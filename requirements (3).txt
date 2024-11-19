@@ -1,0 +1,10 @@
+streamlit
+pickle5
+langchain
+langchain-google-genai
+langchain-groq
+faiss-cpu
+python-dotenv
+google-generativeai
+langchain-community
+unstructured
