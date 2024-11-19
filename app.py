@@ -1,156 +1,120 @@
-from dotenv import load_dotenv
-from langchain_core.messages import AIMessage, HumanMessage
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnablePassthrough
-from langchain_community.utilities import SQLDatabase
-from langchain_core.output_parsers import StrOutputParser
-
-from langchain_groq import ChatGroq
-import streamlit as st
-from dotenv import load_dotenv
-
-# Import ChatGroq instead of ChatGoogleGenerativeAI
-from langchain_groq import ChatGroq
 import os
+import streamlit as st
+import pickle
+import time
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain.vectorstores import FAISS
+from langchain.prompts import PromptTemplate
+from langchain.chains.question_answering import load_qa_chain
+from langchain.document_loaders import UnstructuredURLLoader
+from dotenv import load_dotenv
+
+# Import ChatGroq instead of OpenAI or Google Generative AI
+from langchain_groq import ChatGroq
+
 # Load environment variables
-load_dotenv()
+load_dotenv()  # Loads variables from .env file (e.g., GOOGLE_API_KEY, GROQ_API_KEY)
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")  # It's better to store your Groq API key in .env
-
-
+# Configure Google Generative AI (for embedding generation)
+import google.generativeai as genai
+genai.configure(api_key=GOOGLE_API_KEY)
 
 # Initialize the LLM using ChatGroq
 llm = ChatGroq(
     temperature=0,
-    groq_api_key=GROQ_API_KEY,  # Use the Groq API key from environment variables
+    groq_api_key=GROQ_API_KEY,
     model_name="llama-3.1-70b-versatile"
 )
-def init_database(user: str, password: str, host: str, port: str, database: str) -> SQLDatabase:
-  db_uri = f"mysql+mysqlconnector://{user}:{password}@{host}:{port}/{database}"
-  return SQLDatabase.from_uri(db_uri)
 
-def get_sql_chain(db):
-  template = """
-    You are a data analyst at a company. You are interacting with a user who is asking you questions about the company's database.
-    Based on the table schema below, write a SQL query that would answer the user's question. Take the conversation history into account.
+# Streamlit app setup
+st.title("Chat With Website 🌐")
+st.sidebar.title("Website URLs 🕸️")
+
+# URL input fields
+urls = []
+for i in range(3):
+    url = st.sidebar.text_input(f"URL {i+1}")
+    urls.append(url)
+
+process_url_clicked = st.sidebar.button("Process URLs")
+file_path = "faiss_store_openai.pkl"  # Path to save/load FAISS index
+
+# Main processing placeholder
+main_placeholder = st.empty()
+
+def create_prompt_template():
+    prompt_template = """
+    You are analyzing a webpage 
+    1. Extract and summarize all key information from the page, including any text, columns, and tables. 
+    2. Organize the content into a structured format: main points, key sections, data from tables, and any important insights.
+    3. Answer the following question based on the extracted contentss
+    If the answer is not in the provided context, say, "Answer is not available in the context."
     
-    <SCHEMA>{schema}</SCHEMA>
-    
-    Conversation History: {chat_history}
-    
-    Write only the SQL query and nothing else. Do not wrap the SQL query in any other text, not even backticks.
-    
-    For example:
-    Question: which 3 artists have the most tracks?
-    SQL Query: SELECT ArtistId, COUNT(*) as track_count FROM Track GROUP BY ArtistId ORDER BY track_count DESC LIMIT 3;
-    Question: Name 10 artists
-    SQL Query: SELECT Name FROM Artist LIMIT 10;
-    
-    Your turn:
-    
-    Question: {question}
-    SQL Query:
+    Context:
+    {context}
+
+    Question:
+    {question}
+
+    Answer:
     """
-    
-  prompt = ChatPromptTemplate.from_template(template)
-  
-  # llm = ChatOpenAI(model="gpt-4-0125-preview")
-  
-  
-  def get_schema(_):
-    return db.get_table_info()
-  
-  return (
-    RunnablePassthrough.assign(schema=get_schema)
-    | prompt
-    | llm
-    | StrOutputParser()
-  )
-    
-def get_response(user_query: str, db: SQLDatabase, chat_history: list):
-  sql_chain = get_sql_chain(db)
-  
-  template = """
-    You are a data analyst at a company. You are interacting with a user who is asking you questions about the company's database.
-    Based on the table schema below, question, sql query, and sql response, write a natural language response.
-    <SCHEMA>{schema}</SCHEMA>
+    return PromptTemplate(template=prompt_template, input_variables=["context", "question"])
 
-    Conversation History: {chat_history}
-    SQL Query: <SQL>{query}</SQL>
-    User question: {question}
-    SQL Response: {response}"""
-  
-  prompt = ChatPromptTemplate.from_template(template)
-  
-  # llm = ChatOpenAI(model="gpt-4-0125-preview")
-  llm = ChatGroq(model="mixtral-8x7b-32768", temperature=0)
-  
-  chain = (
-    RunnablePassthrough.assign(query=sql_chain).assign(
-      schema=lambda _: db.get_table_info(),
-      response=lambda vars: db.run(vars["query"]),
+def build_faiss_index(docs):
+    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+    vector_store = FAISS.from_documents(docs, embedding=embeddings)
+    vector_store.save_local("faiss_index")  # Save FAISS index locally
+    return vector_store
+
+def load_faiss_index():
+    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+    return FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
+
+def get_qa_chain():
+    prompt = create_prompt_template()
+    chain = load_qa_chain(llm, chain_type="stuff", prompt=prompt)
+    return chain
+
+if process_url_clicked:
+    loader = UnstructuredURLLoader(urls=urls)
+    main_placeholder.text("Data Loading...Started...✅✅✅")
+    data = loader.load()
+
+    # Split data into chunks
+    text_splitter = RecursiveCharacterTextSplitter(
+        separators=['\n\n', '\n', '.', ','],
+        chunk_size=1000
     )
-    | prompt
-    | llm
-    | StrOutputParser()
-  )
-  
-  return chain.invoke({
-    "question": user_query,
-    "chat_history": chat_history,
-  })
-    
-  
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = [
-      AIMessage(content="Hello! I'm a SQL assistant. Ask me anything about your database."),
-    ]
+    main_placeholder.text("Text Splitter...Started...✅✅✅")
+    docs = text_splitter.split_documents(data)
 
-load_dotenv()
+    # Create and save FAISS index
+    main_placeholder.text("Building FAISS Embedding Vector...✅✅✅")
+    vectorstore = build_faiss_index(docs)
+    time.sleep(2)
+    st.success("FAISS index created and saved successfully!")
 
-st.set_page_config(page_title="Chat with MySQL 🛢", page_icon=":speech_balloon:")
+# Query input and retrieval
+query = main_placeholder.text_input("❀ Ask a Question: ")
+if query:
+    # Load the FAISS index and retrieve similar documents
+    if os.path.exists("faiss_index"):
+        vectorstore = load_faiss_index()
+        docs = vectorstore.similarity_search(query)
 
-st.title("Chat with MySQL 🗄️")
+        # Load the conversational chain and get the response
+        chain = get_qa_chain()
+        response = chain({"input_documents": docs, "question": query}, return_only_outputs=True)
 
-with st.sidebar:
-    st.subheader("Settings")
-    st.write("This is a simple chat application using MySQL. Connect to the database and start chatting.")
-    
-    st.text_input("Host", value="localhost", key="Host")
-    st.text_input("Port", value="3306", key="Port")
-    st.text_input("User", value="root", key="User")
-    st.text_input("Password", type="password", value="swapnil8767", key="Password")
-    st.text_input("Database", value="mumbaihprice", key="Database")
-    
-    if st.button("Connect"):
-        with st.spinner("Connecting to database..."):
-            db = init_database(
-                st.session_state["User"],
-                st.session_state["Password"],
-                st.session_state["Host"],
-                st.session_state["Port"],
-                st.session_state["Database"]
-            )
-            st.session_state.db = db
-            st.success("Connected to database!")
-    
-for message in st.session_state.chat_history:
-    if isinstance(message, AIMessage):
-        with st.chat_message("AI"):
-            st.markdown(message.content)
-    elif isinstance(message, HumanMessage):
-        with st.chat_message("Human"):
-            st.markdown(message.content)
+        st.header("Answer ✨")
+        st.write(response.get("output_text", "No response generated."))
 
-user_query = st.chat_input("Type a message...")
-if user_query is not None and user_query.strip() != "":
-    st.session_state.chat_history.append(HumanMessage(content=user_query))
-    
-    with st.chat_message("Human"):
-        st.markdown(user_query)
-        
-    with st.chat_message("AI"):
-        response = get_response(user_query, st.session_state.db, st.session_state.chat_history)
-        st.markdown(response)
-        
-    st.session_state.chat_history.append(AIMessage(content=response))
+        # Display sources if available
+        sources = response.get("sources", "")
+        if sources:
+            st.subheader("Sources:")
+            for source in sources.split("\n"):
+                st.write(source)
